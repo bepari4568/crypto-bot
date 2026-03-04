@@ -3,98 +3,83 @@ import pandas as pd
 import numpy as np
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # --- CONFIGURATION ---
-TOKEN = '8710909291:AAFA5knDt_EybhJSF5YiK5ljZhyx9fVGPRQ'
+TOKEN = '8710909291:AAFA5knDt_EybhJSF5YiK5ljZhyx9fVG4P' # আপনার টোকেনটি ঠিক আছে তো?
 SYMBOL = 'CORE/USDT'
 TIMEFRAME = '1h'
 
 exchange = ccxt.bitget({'enableRateLimit': True})
 
 def get_indicators(df):
-    # EMA Calculation
+    # EMA & RSI
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
-    
-    # RSI Calculation
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['rsi'] = 100 - (100 / (1 + (gain / loss)))
-    
-    # MACD Calculation
+    # MACD
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp1 - exp2
     df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
-    
-    # Support & Resistance (Pivot Points)
-    last_low = df['low'].tail(24).min()
-    last_high = df['high'].tail(24).max()
-    
-    return df, last_low, last_high
+    # Support & Resistance
+    support = df['low'].tail(24).min()
+    resistance = df['high'].tail(24).max()
+    return df, support, resistance
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("🔍 Performing Deep Market Analysis (EMA, MACD, RSI)...")
+    status = await update.message.reply_text("⏳ ক্যালকুলেশন হচ্ছে, দয়া করে অপেক্ষা করুন...")
     
     try:
         ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         
         df, support, resistance = get_indicators(df)
-        
         curr = df.iloc[-1]
-        prev = df.iloc[-2]
-        avg_vol = df['vol'].tail(20).mean()
         
-        # --- Logic for Signal ---
-        decision = "NEUTRAL ⚡"
-        strength = "Low"
-        
-        # Buy Condition: Price > EMA20 and MACD > Signal and RSI < 70
-        if curr['close'] > curr['ema20'] and curr['macd'] > curr['signal_line'] and curr['rsi'] < 70:
-            if curr['vol'] > avg_vol:
-                decision = "STRONG BUY 🚀"
-                strength = "High"
-            else:
-                decision = "BUY 📈"
-                strength = "Medium"
-                
-        # Sell Condition: Price < EMA20 and MACD < Signal and RSI > 30
-        elif curr['close'] < curr['ema20'] and curr['macd'] < curr['signal_line'] and curr['rsi'] > 30:
-            if curr['vol'] > avg_vol:
-                decision = "STRONG SELL 📉"
-                strength = "High"
-            else:
-                decision = "SELL 🆘"
-                strength = "Medium"
+        # --- ১. ক্যান্ডেল ক্লোজিং টাইমার ---
+        tz = pytz.timezone('Asia/Dhaka')
+        now = datetime.now(tz)
+        # পরবর্তী ঘণ্টার শুরুর সময় বের করা
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        remaining_time = next_hour - now
+        minutes_left = int(remaining_time.total_seconds() // 60)
+        close_time_str = next_hour.strftime('%I:%00 %p')
 
-        bd_time = datetime.now(pytz.timezone('Asia/Dhaka')).strftime('%I:%M %p')
+        # --- ২. ক্লোজিং প্রাইস প্রেডিকশন (Simple AI logic) ---
+        # যদি MACD ও EMA পজিটিভ হয়, তবে হাই প্রাইসের কাছাকাছি ক্লোজ হওয়ার সম্ভাবনা থাকে
+        prediction_price = curr['close'] + (curr['macd'] * 0.5) 
+        prediction_price = round(prediction_price, 4)
+
+        # --- ৩. সিগন্যাল লজিক ---
+        if curr['close'] > curr['ema20'] and curr['macd'] > curr['signal_line']:
+            signal = "BUY 🚀"
+        elif curr['close'] < curr['ema20'] and curr['macd'] < curr['signal_line']:
+            signal = "SELL 📉"
+        else:
+            signal = "WAIT ⚡"
 
         msg = (
-            f"🎯 **CORE/USDT 1H SMART REPORT**\n"
+            f"📊 **CORE/USDT ১ ঘণ্টার রিপোর্ট**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 **Price:** `${curr['close']}`\n"
-            f"📊 **Signal:** `{decision}`\n"
-            f"💪 **Strength:** `{strength}`\n"
+            f"💰 **বর্তমান প্রাইস:** `${curr['close']}`\n"
+            f"🔮 **সম্ভাব্য ক্লোজিং প্রাইস:** `${prediction_price}`\n"
+            f"⏰ **ক্যান্ডেল ক্লোজ হবে:** `{close_time_str}`\n"
+            f"⏳ **বাকি আছে:** `{minutes_left} মিনিট`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📏 **Support:** `${round(support, 4)}`\n"
-            f"🧱 **Resistance:** `${round(resistance, 4)}`\n"
+            f"🚦 **সিগন্যাল:** **{signal}**\n"
+            f"📏 **সাপোর্ট:** `${round(support, 4)}`\n"
+            f"🧱 **রেজিস্ট্যান্স:** `${round(resistance, 4)}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🌡️ **RSI:** `{round(curr['rsi'], 2)}` | " + ("Overbought" if curr['rsi'] > 70 else "Oversold" if curr['rsi'] < 30 else "Normal") + "\n"
+            f"📈 **EMA Trend:** " + ("Upward" if curr['close'] > curr['ema20'] else "Downward") + "\n"
             f"📉 **MACD:** " + ("Bullish" if curr['macd'] > curr['signal_line'] else "Bearish") + "\n"
-            f"📈 **EMA Trend:** " + ("Upward" if curr['ema20'] > curr['ema50'] else "Downward") + "\n"
-            f"📊 **Volume:** " + ("Surging 🟢" if curr['vol'] > avg_vol else "Stable ⚪") + "\n"
+            f"📊 **ভলিউম:** " + ("High 🟢" if curr['vol'] > df['vol'].tail(10).mean() else "Normal ⚪") + "\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🕒 **BD Time:** `{bd_time}`\n"
-            f"⚠️ *Analysis based on multiple indicators.*"
+            f"🕒 **এখন সময়:** `{now.strftime('%I:%M %p')}`"
         )
         await status.edit_text(msg, parse_mode='Markdown')
         
     except Exception as e:
-        await status.edit_text(f"❌ Analysis failed: {str(e)}")
+        await status.edit_text(f"❌ এরর: {str(e)}")
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
