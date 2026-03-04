@@ -1,93 +1,102 @@
 import ccxt
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
-import asyncio
 
 # --- CONFIGURATION ---
 TOKEN = '8710909291:AAFA5knDt_EybhJSF5YiK5ljZhyx9fVGPRQ'
 SYMBOL = 'CORE/USDT'
-TIMEFRAME = '4h'
+TIMEFRAME = '1h'
 
-# Enhanced connection for stability
-exchange = ccxt.bitget({
-    'enableRateLimit': True,
-    'timeout': 60000, 
-    'options': {'defaultType': 'spot'}
-})
+exchange = ccxt.bitget({'enableRateLimit': True})
 
-def get_candle_time_left():
-    now = datetime.now(pytz.utc)
-    hours_passed = now.hour % 4
-    next_close = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=(4 - hours_passed))
-    time_left = next_close - now
-    h, rem = divmod(int(time_left.total_seconds()), 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}h {m}m {s}s"
-
-async def get_comprehensive_data():
-    # Attempting to fetch data with retries for low battery stability
-    for attempt in range(3):
-        try:
-            ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=101)
-            df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-            
-            # Summary (Previous Candle)
-            prev_candle = df.iloc[-2]
-            
-            # AI Prediction (Current Trend)
-            curr_price = df['close'].iloc[-1]
-            X = np.array(range(len(df))).reshape(-1, 1)
-            y = df['close'].values
-            model = LinearRegression().fit(X, y)
-            ai_target = round(model.predict([[len(df)]])[0], 4)
-            
-            # Time Settings
-            utc_now = datetime.now(pytz.utc)
-            bd_time = utc_now.astimezone(pytz.timezone('Asia/Dhaka')).strftime('%I:%M %p (%d %b)')
-            utc_time = utc_now.strftime('%I:%M %p')
-
-            return {
-                'p_open': prev_candle['open'], 'p_close': prev_candle['close'],
-                'entry': curr_price, 'ai_pred': ai_target,
-                'bd': bd_time, 'utc': utc_time, 'tl': get_candle_time_left()
-            }
-        except:
-            await asyncio.sleep(3)
-    return None
+def get_indicators(df):
+    # EMA Calculation
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    
+    # RSI Calculation
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['rsi'] = 100 - (100 / (1 + (gain / loss)))
+    
+    # MACD Calculation
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd'] = exp1 - exp2
+    df['signal_line'] = df['macd'].ewm(span=9, adjust=False).mean()
+    
+    # Support & Resistance (Pivot Points)
+    last_low = df['low'].tail(24).min()
+    last_high = df['high'].tail(24).max()
+    
+    return df, last_low, last_high
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = await update.message.reply_text("📡 Generating Full Market Report...")
-    data = await get_comprehensive_data()
+    status = await update.message.reply_text("🔍 Performing Deep Market Analysis (EMA, MACD, RSI)...")
     
-    if data:
+    try:
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=100)
+        df = pd.DataFrame(ohlcv, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        
+        df, support, resistance = get_indicators(df)
+        
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        avg_vol = df['vol'].tail(20).mean()
+        
+        # --- Logic for Signal ---
+        decision = "NEUTRAL ⚡"
+        strength = "Low"
+        
+        # Buy Condition: Price > EMA20 and MACD > Signal and RSI < 70
+        if curr['close'] > curr['ema20'] and curr['macd'] > curr['signal_line'] and curr['rsi'] < 70:
+            if curr['vol'] > avg_vol:
+                decision = "STRONG BUY 🚀"
+                strength = "High"
+            else:
+                decision = "BUY 📈"
+                strength = "Medium"
+                
+        # Sell Condition: Price < EMA20 and MACD < Signal and RSI > 30
+        elif curr['close'] < curr['ema20'] and curr['macd'] < curr['signal_line'] and curr['rsi'] > 30:
+            if curr['vol'] > avg_vol:
+                decision = "STRONG SELL 📉"
+                strength = "High"
+            else:
+                decision = "SELL 🆘"
+                strength = "Medium"
+
+        bd_time = datetime.now(pytz.timezone('Asia/Dhaka')).strftime('%I:%M %p')
+
         msg = (
-            f"📊 **LAST 4H SUMMARY**\n"
+            f"🎯 **CORE/USDT 1H SMART REPORT**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🏁 Prev Open: `${data['p_open']}`\n"
-            f"✅ Prev Close: `${data['p_close']}`\n"
+            f"💰 **Price:** `${curr['close']}`\n"
+            f"📊 **Signal:** `{decision}`\n"
+            f"💪 **Strength:** `{strength}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔮 **AI NEXT 4H FORECAST**\n"
-            f"💰 Entry Price: `${data['entry']}`\n"
-            f"🎯 AI Target: `${data['ai_pred']}`\n"
-            f"🚦 Signal: " + ("BUY 🚀" if data['ai_pred'] > data['entry'] else "SELL 📉") + "\n"
+            f"📏 **Support:** `${round(support, 4)}`\n"
+            f"🧱 **Resistance:** `${round(resistance, 4)}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ **Candle Close In:** `{data['tl']}`\n"
-            f"🕒 **BD Time:** {data['bd']}\n"
-            f"🌐 **UTC Time:** {data['utc']}\n"
+            f"🌡️ **RSI:** `{round(curr['rsi'], 2)}` | " + ("Overbought" if curr['rsi'] > 70 else "Oversold" if curr['rsi'] < 30 else "Normal") + "\n"
+            f"📉 **MACD:** " + ("Bullish" if curr['macd'] > curr['signal_line'] else "Bearish") + "\n"
+            f"📈 **EMA Trend:** " + ("Upward" if curr['ema20'] > curr['ema50'] else "Downward") + "\n"
+            f"📊 **Volume:** " + ("Surging 🟢" if curr['vol'] > avg_vol else "Stable ⚪") + "\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚠️ *Not Financial Advice!*"
+            f"🕒 **BD Time:** `{bd_time}`\n"
+            f"⚠️ *Analysis based on multiple indicators.*"
         )
         await status.edit_text(msg, parse_mode='Markdown')
-    else:
-        await status.edit_text("❌ Connection Error. Please wait 1 min and try again.")
+        
+    except Exception as e:
+        await status.edit_text(f"❌ Analysis failed: {str(e)}")
 
 if __name__ == '__main__':
-    print("Bot is LIVE! Ensure battery is above 15%.")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
